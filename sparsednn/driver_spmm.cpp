@@ -177,19 +177,19 @@ void runCublas(CUdeviceptr d_A, CUdeviceptr d_B, CUdeviceptr d_C)
         checkCublasErrors(
             cublasSgemm(
                 cublasHandle,
-                CUBLAS_OP_T, // Transpose first matrix (d_B)
-                CUBLAS_OP_T, // Transpose second matrix (d_A)
-                N,           // Effective rows of op(A) (N rows from B_T)
-                M,           // Effective cols of op(B) (M cols from A_T)
-                K,           // Common dimension
+                CUBLAS_OP_N, // d_B^T
+                CUBLAS_OP_N, // d_A^T
+                N_dim,       // Effective rows of op(A) (N rows from B_T)
+                M_dim,       // Effective cols of op(B) (M cols from A_T)
+                K_dim,       // Common dimension
                 &alpha,      // Alpha scalar
                 (float*)d_B, // Device pointer to B (becomes op(A))
-                N,           // Leading dimension of B_T (N rows)
+                N_dim,       // Leading dimension of B_T (N rows)
                 (float*)d_A, // Device pointer to A (becomes op(B))
-                K,           // Leading dimension of A_T (K rows)
+                K_dim,       // Leading dimension of A_T (K rows)
                 &beta,       // Beta scalar
                 (float*)d_C, // Device pointer to C_T (result)
-                N            // Leading dimension of C_T (N rows)
+                N_dim        // Leading dimension of C_T (N rows)
             )
         );
     }
@@ -223,7 +223,7 @@ int main(int argc, char **argv)
     cnpy::NpyArray arr0 = cnpy::npy_load("A.npy");
     float * A = arr0.data<float>();
     assert(arr0.word_size = sizeof(float));
-    assert(arr0.shape.size()==2 && arr1.shape[0] == M_dim && arr1.shape[1] == K_dim);
+    assert(arr0.shape.size()==2 && arr0.shape[0] == M_dim && arr0.shape[1] == K_dim);
 
     cnpy::NpyArray arr1 = cnpy::npy_load("B.npy");
     float * B = arr1.data<float>();
@@ -238,7 +238,7 @@ int main(int argc, char **argv)
     cnpy::NpyArray arr3 = cnpy::npy_load("ref_transposed.npy");
     float * C_transposed = arr3.data<float>();
     assert(arr3.word_size = sizeof(float));
-    assert(arr3.shape.size()==2 && arr2.shape[0] == N_dim && arr2.shape[1] == M_dim);
+    assert(arr3.shape.size()==2 && arr3.shape[0] == N_dim && arr3.shape[1] == M_dim);
 
     __half * B_h, * C_h;
     B_h = (__half *)malloc(N_dim * K_dim *2);
@@ -278,11 +278,7 @@ int main(int argc, char **argv)
     float error = 0;
     for(int i = 0 ; i < M_dim * N_dim; i ++)
     {
-        #ifndef TESTCUBLAS
         auto diff = abs(result[i] - ((float*)C)[i]);
-        #else
-        auto diff = abs(result[i] - ((float*)C_transposed)[i]);
-        #endif
 	if (diff > 0.1)
 	{
 	//	std::cout << i << " " << result[i] << " " << ((float*)C)[i] << std::endl;

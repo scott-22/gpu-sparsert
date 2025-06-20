@@ -5,11 +5,13 @@ import subprocess
 import sys
 
 # Edit this to contain the paths to include directories (that aren't already in include path)
-NVCC_INCLUDE_PATHS = ["-I /h/s29hao/gpu-sparsert/build/include"]
+NVCC_INCLUDE_PATHS = ["-I /h/s29hao/sparsert/build/include"]
 
 # Edit this to contain the paths to library directories (that aren't already in library path)
 # Make sure to include them in `LD_LIBRARY_PATH` when running the benchmark
-NVCC_LINK_PATHS = ["-L /h/s29hao/gpu-sparsert/build/lib", "-L /pkgs/cuda-11.0/lib64"]
+NVCC_LINK_PATHS = ["-L /h/s29hao/sparsert/build/lib", "-L /pkgs/cuda-11.0/lib64"]
+
+# Also, edit the paths in `sparsednn/code_gen_ptx.py`
 
 # We are doing the matrix multiplication C = A * B, where A is the weight matrix and B is the input matrix
 # Suppose A has shape (M, K) and B has shape (K, N), then C has shape (M, N)
@@ -61,8 +63,8 @@ if args.source == "mobilenet":
     if args.name == "sparsert":
         subprocess.run([
             "python", "sparsednn/code_gen_ptx.py", 
-            "--A_dim", M, "--B_dim", K, "--C_dim", N,
-            "--A_blocks", A_BLOCKS, "--C_blocks", C_BLOCKS, "--Gy", Gy,
+            "--A_dim", str(M), "--B_dim", str(K), "--C_dim", str(N),
+            "--A_blocks", str(A_BLOCKS), "--C_blocks", str(C_BLOCKS), "--Gy", str(Gy),
             "--infile", f"mobilenet/contraction_1x1_{args.index}_transposed.npy",  # SparseRT seems to require transpose of weight matrix
             "--outfile", "testing.ptx"
         ], check=True)
