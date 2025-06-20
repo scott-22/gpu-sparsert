@@ -16,8 +16,6 @@ NVCC_LINK_PATHS = ["-L /h/s29hao/sparsert/build/lib", "-L /pkgs/cuda-11.0/lib64"
 # We are doing the matrix multiplication C = A * B, where A is the weight matrix and B is the input matrix
 # Suppose A has shape (M, K) and B has shape (K, N), then C has shape (M, N)
 
-FORMAT = "NCHW"
-
 parser = argparse.ArgumentParser(description="Benchmarking script for SpMM")
 parser.add_argument("name", help="name of solution we are benchmarking ('cublas', 'sparsert')")
 parser.add_argument("source", help="source of the benchmark data ('mobilenet', 'sparsednn-1024')")
@@ -38,6 +36,46 @@ def load_weight_matrix(path: str, N: int):
     np.save("ref.npy", out_matrix.astype(np.float32))
     np.save("ref_transposed.npy", out_matrix.astype(np.float32).transpose())
 
+def generate_sparsert_test(
+    M: int, K: int, N: int, A_BLOCKS: int, C_BLOCKS: int, Gy: int, infile: str
+):
+    subprocess.run([
+        "python", "sparsednn/code_gen_ptx.py", 
+        "--A_dim", str(M), "--B_dim", str(K), "--C_dim", str(N),
+        "--A_blocks", str(A_BLOCKS), "--C_blocks", str(C_BLOCKS), "--Gy", str(Gy),
+        "--infile", infile, "--outfile", "testing.ptx"
+    ], check=True)
+
+    subprocess.run([
+        "ptxas", "-arch=sm_75", "testing.ptx", "-o", "testing.cubin"
+    ], check=True)
+
+    subprocess.run(
+        [
+            "nvcc", "sparsednn/driver_spmm.cpp", "-w", "-O3",
+            f"-DM_dim={M},K_dim={K},N_dim={N},A_Blocks={A_BLOCKS},C_Blocks={C_BLOCKS},Gy={Gy}",
+            "-lcuda", "-lcudart", "-lcnpy", "-lcublas", "-o", "spmm", "--std=c++11", "-Xptxas=-v"
+        ] + NVCC_INCLUDE_PATHS + NVCC_LINK_PATHS,
+        check=True,
+    )
+
+def generate_cublas_test(
+    M: int, K: int, N: int, A_BLOCKS: int, C_BLOCKS: int, Gy: int, _: str
+):
+    subprocess.run(
+        [
+            "nvcc", "sparsednn/driver_spmm.cpp", "-w", "-O3",
+            f"-DM_dim={M},K_dim={K},N_dim={N},A_Blocks={A_BLOCKS},C_Blocks={C_BLOCKS},Gy={Gy},TESTCUBLAS=1",
+            "-lcuda", "-lcudart", "-lcnpy", "-lcublas", "-o", "spmm", "--std=c++11", "-Xptxas=-v"
+        ] + NVCC_INCLUDE_PATHS + NVCC_LINK_PATHS,
+        check=True,
+    )
+
+TEST = {
+    "sparsert": generate_sparsert_test,
+    "cublas": generate_cublas_test,
+}
+
 if args.name not in ["cublas", "sparsert"]:
     print("Invalid solution name to benchmark")
     sys.exit(-1)
@@ -50,7 +88,7 @@ if args.source == "mobilenet":
     if args.index < 0 or args.index > 12:
         print("Invalid index")
 
-    # Use hardcoded values for dimensions M, N, K. The logic for these values (and the subsequent block allocation) is in autotune_float.sh
+    # Use hardcoded values for dimensions M, K, N. The logic for these values (and the subsequent block allocation) is in autotune_float.sh
     # We skip the autotuning process, since the code currently in autotune_float.sh doesn't actually do any autotuning, so I'm not sure
     # what it should look like.
     DIMENSIONS = [(64, 32, 12544), (128, 64, 3136), (128, 128, 3136), (256, 128, 784), (256, 256, 784), (512, 256, 196), (512, 512, 196), (1024, 512, 49), (1024, 1024, 49)]
@@ -60,39 +98,13 @@ if args.source == "mobilenet":
     C_BLOCKS = N // 49   # Same as above, should be "N_BLOCKS"
     Gy = 1
 
-    if args.name == "sparsert":
-        subprocess.run([
-            "python", "sparsednn/code_gen_ptx.py", 
-            "--A_dim", str(M), "--B_dim", str(K), "--C_dim", str(N),
-            "--A_blocks", str(A_BLOCKS), "--C_blocks", str(C_BLOCKS), "--Gy", str(Gy),
-            "--infile", f"mobilenet/contraction_1x1_{args.index}_transposed.npy",  # SparseRT seems to require transpose of weight matrix
-            "--outfile", "testing.ptx"
-        ], check=True)
-
-        subprocess.run([
-            "ptxas", "-arch=sm_75", "testing.ptx", "-o", "testing.cubin"
-        ], check=True)
-
-        subprocess.run(
-            [
-                "nvcc", "sparsednn/driver_spmm.cpp", "-w", "-O3",
-                f"-DM_dim={M},K_dim={K},N_dim={N},A_Blocks={A_BLOCKS},C_Blocks={C_BLOCKS},Gy={Gy}",
-                "-lcuda", "-lcudart", "-lcnpy", "-lcublas", "-o", "sparsert", "--std=c++11", "-Xptxas=-v"
-            ] + NVCC_INCLUDE_PATHS + NVCC_LINK_PATHS,
-            check=True,
-        )
-    elif args.name == "cublas":
-        subprocess.run(
-            [
-                "nvcc", "sparsednn/driver_spmm.cpp", "-w", "-O3",
-                f"-DM_dim={M},K_dim={K},N_dim={N},A_Blocks={A_BLOCKS},C_Blocks={C_BLOCKS},Gy={Gy},TESTCUBLAS=1",
-                "-lcuda", "-lcudart", "-lcnpy", "-lcublas", "-o", "sparsert", "--std=c++11", "-Xptxas=-v"
-            ] + NVCC_INCLUDE_PATHS + NVCC_LINK_PATHS,
-            check=True,
-        )
+    TEST[args.name](
+        M, K, N, A_BLOCKS, C_BLOCKS, Gy,
+        f"mobilenet/contraction_1x1_{args.index}_transposed.npy"  # SparseRT seems to require transpose of weight matrix
+    )
 
     subprocess.run(
-        "./sparsert > runtime",
+        "./spmm > runtime",
         shell=True,
         check=True,
     )
