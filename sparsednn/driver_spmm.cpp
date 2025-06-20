@@ -19,15 +19,25 @@
 // in the event that a CUDA host call returns an error
 #define checkCudaErrors(err)  __checkCudaErrors (err, __FILE__, __LINE__)
 
-//#define A_dim 64
-//#define B_dim 256
-//#define C_dim 3136
+#define checkCublasErrors(call)                                                   \
+    {                                                                             \
+        cublasStatus_t status = call;                                             \
+        if (status != CUBLAS_STATUS_SUCCESS) {                                    \
+            fprintf(stderr, "cuBLAS Error: %d in %s at line %d\n",                \
+                    status, __FILE__, __LINE__);                                  \
+            exit(-1);                                                             \
+        }                                                                         \
+    }
+
+//#define M_dim 64
+//#define K_dim 256
+//#define N_dim 3136
 
 //#define A_Blocks 2
 //#define C_Blocks 98
 
 #define Tsy 1
-#define Tsz (C_dim / C_Blocks)
+#define Tsz (N_dim / C_Blocks)
 #define ST 1
 #define Fx 1
 #define Fy (Tsz/Fx)
@@ -114,30 +124,9 @@ void initfunction() {
     }
 }
 
-void finalizeCUDA()
+void runKernel(CUdeviceptr d_B, CUdeviceptr d_residual, CUdeviceptr d_C)
 {
-    cuCtxDetach(context);
-}
-
-void setupDeviceMemory(CUdeviceptr *d_a, CUdeviceptr *d_b, int a, int b)
-{
-    checkCudaErrors( cuMemAlloc(d_a, a) );
-    checkCudaErrors( cuMemAlloc(d_b, b) );
-}
-
-void releaseDeviceMemory(CUdeviceptr d_a, CUdeviceptr d_b)
-{
-    checkCudaErrors( cuMemFree(d_a) );
-    checkCudaErrors( cuMemFree(d_b) );
-}
-
-void runKernel(CUdeviceptr d_BC, CUdeviceptr d_residual, CUdeviceptr d_AC)
-{
-#if RESIDUAL
-    void *args[3] = { &d_BC, &d_residual, &d_AC};
-#else
-    void *args[2] = { &d_BC, &d_AC};
-#endif
+    void *args[2] = { &d_B, &d_C};
 
     // grid for kernel: <<<N, 1>>>
 
@@ -147,25 +136,15 @@ void runKernel(CUdeviceptr d_BC, CUdeviceptr d_residual, CUdeviceptr d_AC)
     cuEventCreate(&stop,0);
     cuEventRecord(start,0);
 
-#if HALF
-    std::cout << A_Blocks << " " << C_Blocks << " " << Block_size/2 << std::endl;
-#else
+    std::cout << "Executing SparseRT kernel\n";
     std::cout << A_Blocks << " " << C_Blocks << " " << Block_size << std::endl;
-#endif
 
-#if HALF
-    for(int i = 0;i < 1000; i ++){
-    checkCudaErrors( cuLaunchKernel(function, A_Blocks, C_Blocks, 1,  // Nx1x1 blocks
-                                    Block_size/2, 1, 1,            // 1x1x1 threads
-                                    0, 0, args, 0) );
-    }
-#else
     for(int i = 0;i < 1000; i ++){
     checkCudaErrors( cuLaunchKernel(function, A_Blocks, C_Blocks, 1,  // Nx1x1 blocks
                                     Block_size, 1, 1,            // 1x1x1 threads
                                     0, 0, args, 0) );
     }
-#endif
+
     cuEventRecord(stop,0);
     //cudaProfilerStop();
     cuEventSynchronize(stop);
@@ -173,6 +152,55 @@ void runKernel(CUdeviceptr d_BC, CUdeviceptr d_residual, CUdeviceptr d_AC)
     cuEventElapsedTime(&time,start,stop);
     cuEventDestroy(start);
     cuEventDestroy(stop);
+    std::cout << "kernel used " << time / 1000.0 << std::endl;
+
+}
+
+void runCublas(CUdeviceptr d_A, CUdeviceptr d_B, CUdeviceptr d_C)
+{
+
+    cublasHandle_t cublasHandle;
+    checkCublasErrors(cublasCreate(&cublasHandle));
+
+    CUevent start, stop;
+    //cudaProfilerStart();
+    cuEventCreate(&start,0);
+    cuEventCreate(&stop,0);
+    cuEventRecord(start,0);
+
+    const float alpha = 1.0;
+    const float beta = 0.0;
+
+    std::cout << "Executing cuBLAS kernel" << std::endl;
+
+    for(int i = 0;i < 1000; i ++){
+        checkCublasErrors(
+            cublasSgemm(
+                cublasHandle,
+                CUBLAS_OP_T, // Transpose first matrix (d_B)
+                CUBLAS_OP_T, // Transpose second matrix (d_A)
+                N,           // Effective rows of op(A) (N rows from B_T)
+                M,           // Effective cols of op(B) (M cols from A_T)
+                K,           // Common dimension
+                &alpha,      // Alpha scalar
+                (float*)d_B, // Device pointer to B (becomes op(A))
+                N,           // Leading dimension of B_T (N rows)
+                (float*)d_A, // Device pointer to A (becomes op(B))
+                K,           // Leading dimension of A_T (K rows)
+                &beta,       // Beta scalar
+                (float*)d_C, // Device pointer to C_T (result)
+                N            // Leading dimension of C_T (N rows)
+            )
+        );
+    }
+    cuEventRecord(stop,0);
+    //cudaProfilerStop();
+    cuEventSynchronize(stop);
+    float time;
+    cuEventElapsedTime(&time,start,stop);
+    cuEventDestroy(start);
+    cuEventDestroy(stop);
+    checkCublasErrors(cublasDestroy(cublasHandle));
     std::cout << "kernel used " << time / 1000.0 << std::endl;
 
 }
@@ -192,90 +220,84 @@ void half2float(__half * in, float * out, int n) {
 
 int main(int argc, char **argv)
 {
+    cnpy::NpyArray arr0 = cnpy::npy_load("A.npy");
+    float * A = arr0.data<float>();
+    assert(arr0.word_size = sizeof(float));
+    assert(arr0.shape.size()==2 && arr1.shape[0] == M_dim && arr1.shape[1] == K_dim);
 
-    cnpy::NpyArray arr1 = cnpy::npy_load("BC.npy");
-    float * BC = arr1.data<float>();
+    cnpy::NpyArray arr1 = cnpy::npy_load("B.npy");
+    float * B = arr1.data<float>();
     assert(arr1.word_size = sizeof(float));
-    assert(arr1.shape.size()==2 && arr1.shape[0] == B_dim && arr1.shape[1] == C_dim);
+    assert(arr1.shape.size()==2 && arr1.shape[0] == K_dim && arr1.shape[1] == N_dim);
 
     cnpy::NpyArray arr2 = cnpy::npy_load("ref.npy");
-    float * AC = arr2.data<float>();
+    float * C = arr2.data<float>();
     assert(arr2.word_size = sizeof(float));
-    assert(arr2.shape.size()==2 && arr2.shape[0] == A_dim && arr2.shape[1] == C_dim);
+    assert(arr2.shape.size()==2 && arr2.shape[0] == M_dim && arr2.shape[1] == N_dim);
 
-#if RESIDUAL
-    cnpy::NpyArray arr3 = cnpy::npy_load("residual.npy");
-    float * residual = arr3.data<float>();
+    cnpy::NpyArray arr3 = cnpy::npy_load("ref_transposed.npy");
+    float * C_transposed = arr3.data<float>();
     assert(arr3.word_size = sizeof(float));
-    assert(arr3.shape.size()==2 && arr3.shape[0] == A_dim && arr3.shape[1] == C_dim);
+    assert(arr3.shape.size()==2 && arr2.shape[0] == N_dim && arr2.shape[1] == M_dim);
 
-    __half * residual_h;
-    residual_h = (__half *)malloc(A_dim * C_dim * 2);
-    float2half(residual,residual_h,A_dim * C_dim);
-    std::cout << residual_h[0] << std::endl;
-#endif
+    __half * B_h, * C_h;
+    B_h = (__half *)malloc(N_dim * K_dim *2);
+    C_h = (__half *)malloc(M_dim * N_dim *2);
+    float2half(B,B_h,K_dim * N_dim);
 
-    __half * BC_h, * AC_h;
-    BC_h = (__half *)malloc(C_dim * B_dim *2);
-    AC_h = (__half *)malloc(A_dim * C_dim *2);
-    float2half(BC,BC_h,B_dim * C_dim);
-
-    CUdeviceptr d_BC, d_AC, d_residual;
+    CUdeviceptr d_A, d_B, d_C, d_residual;
 
     initCUDA();
 
+    #ifndef TESTCUBLAS
     initfunction();
+    #endif
 
     // allocate memory
-#if HALF
-    setupDeviceMemory(&d_BC, &d_AC, 2 * B_dim * C_dim, 2 * A_dim * C_dim);
-#if RESIDUAL
-    checkCudaErrors( cuMemAlloc(&d_residual, 2 * A_dim * C_dim) );
-    checkCudaErrors (cuMemcpyHtoD(d_residual, residual_h, 2 * A_dim * C_dim) );
-#endif
-    checkCudaErrors( cuMemcpyHtoD(d_BC, BC_h,2 * B_dim * C_dim) );
-#else
-    setupDeviceMemory(&d_BC, &d_AC, sizeof(float) * B_dim * C_dim, sizeof(float) * A_dim * C_dim);
-#if RESIDUAL
-    checkCudaErrors( cuMemAlloc(&d_residual, 4 * A_dim * C_dim) );
-    checkCudaErrors (cuMemcpyHtoD(d_residual, residual, 4 * A_dim * C_dim) );
-#endif
-    checkCudaErrors( cuMemcpyHtoD(d_BC, BC, sizeof(float) * B_dim * C_dim) );
-#endif
-
+    checkCudaErrors( cuMemAlloc(&d_A, sizeof(float) * M_dim * K_dim) );
+    checkCudaErrors( cuMemAlloc(&d_B, sizeof(float) * K_dim * N_dim) );
+    checkCudaErrors( cuMemAlloc(&d_C, sizeof(float) * M_dim * N_dim) );
+    
+    checkCudaErrors( cuMemcpyHtoD(d_A, A, sizeof(float) * M_dim * K_dim) );
+    checkCudaErrors( cuMemcpyHtoD(d_B, B, sizeof(float) * K_dim * N_dim) );
 
     // run
     //printf("# Running the kernel...\n");
-    runKernel(d_BC, d_residual, d_AC);
+    #ifndef TESTCUBLAS
+    runKernel(d_B, d_residual, d_C);
+    #else
+    runCublas(d_A, d_B, d_C);
+    #endif
     //printf("# Kernel complete.\n");
 
     // copy results to host and report
     float *result;
-    result = (float *)malloc(A_dim * C_dim *sizeof(float));
-#if HALF
-    checkCudaErrors( cuMemcpyDtoH(AC_h, d_AC, 2 * A_dim * C_dim) );
-    half2float(AC_h,result,A_dim * C_dim);
-#else
-    checkCudaErrors( cuMemcpyDtoH(result, d_AC, sizeof(float) * A_dim * C_dim) );
-#endif
+    result = (float *)malloc(M_dim * N_dim *sizeof(float));
+    checkCudaErrors( cuMemcpyDtoH(result, d_C, sizeof(float) * M_dim * N_dim) );
 
     float error = 0;
-    for(int i = 0 ; i < A_dim * C_dim; i ++)
+    for(int i = 0 ; i < M_dim * N_dim; i ++)
     {
-        auto diff = abs(result[i] - ((float*)AC)[i]);
+        #ifndef TESTCUBLAS
+        auto diff = abs(result[i] - ((float*)C)[i]);
+        #else
+        auto diff = abs(result[i] - ((float*)C_transposed)[i]);
+        #endif
 	if (diff > 0.1)
 	{
-	//	std::cout << i << " " << result[i] << " " << ((float*)AC)[i] << std::endl;
+	//	std::cout << i << " " << result[i] << " " << ((float*)C)[i] << std::endl;
 	}
 	error += diff;
     }
 
     std::cout << result[0] << result[1] << result[2] << std::endl;
-    cnpy::npy_save("ptx_result.npy",&result[0],{A_dim,C_dim},"w");
+    cnpy::npy_save("ptx_result.npy",&result[0],{M_dim,N_dim},"w");
     std::cout << "error: " << error << std::endl;
     // finish
     //printf("- Finalizing...\n");
-    releaseDeviceMemory(d_AC, d_BC);
-    finalizeCUDA();
+    checkCudaErrors( cuMemFree(d_A) );
+    checkCudaErrors( cuMemFree(d_B) );
+    checkCudaErrors( cuMemFree(d_C) );
+    cuCtxDetach(context);
     return 0;
 }
