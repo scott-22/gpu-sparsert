@@ -53,11 +53,12 @@ import struct
 def hex_to_float(hex):
     return struct.unpack('!f', bytes.fromhex(hex))[0]
 
-def insert_ptx(in_ptx_file,out_ptx_file, block_ptxs,relu=True,blurb=None,id = None):
+def insert_ptx(in_ptx_file,out_ptx_file, block_ptxs, half, relu=True,blurb=None,id = None):
     ptx_code = open(in_ptx_file,"r").readlines()
     new_file = open(out_ptx_file,"w")
     i = 0
     mads = 0
+    created_register = False
     while i < len(ptx_code):
         line = ptx_code[i]
         #print("change ptx utils line 64 for your problems")
@@ -75,6 +76,13 @@ def insert_ptx(in_ptx_file,out_ptx_file, block_ptxs,relu=True,blurb=None,id = No
             my_block = int(line.split("B")[1].split("G")[0])
             my_group = int(line.split("G")[1].split(";")[0])
             my_ptx = block_ptxs[my_block][my_group]
+            if not created_register:
+                if half:
+                    ptx = "\t.reg .f32 load_reg;\n\t.reg .f32 temp_reg;\n\t.reg .f32 virg_reg, bias_reg, pred_reg,zero_reg;\n\t mov.u32 zero_reg, 0x00000000;"
+                else:
+                    ptx = "\t.reg .f32 load_reg;"
+                my_ptx = ptx + my_ptx
+                created_register = True
 
             # we have to deal with cases where the load instruction doesn't
             # immediately follow the inline assembly marker

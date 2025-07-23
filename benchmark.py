@@ -92,9 +92,12 @@ if args.source == "mobilenet":
     # Use hardcoded values for dimensions M, K, N. The logic for these values (and the subsequent block allocation) is in autotune_float.sh
     # We skip the autotuning process, since the code currently in autotune_float.sh doesn't actually do any autotuning, so I'm not sure
     # what it should look like.
-    DIMENSIONS = [(64, 32, 12544), (128, 64, 3136), (128, 128, 3136), (256, 128, 784), (256, 256, 784), (512, 256, 196), (512, 512, 196), (1024, 512, 49), (1024, 1024, 49)]
-    M, K, N = DIMENSIONS[args.index]
-    load_weight_matrix(f"mobilenet/contraction_1x1_{args.index}.npy", N)
+    DIMENSIONS = [(64, 32, 12544), (128, 64, 3136), (128, 128, 3136), (256, 128, 784), (256, 256, 784), (512, 256, 196), (512, 512, 196), 0, 0, 0, 0, (1024, 512, 49), (1024, 1024, 49)]
+    if not (7 <= args.index <= 10):
+        M, K, N = DIMENSIONS[args.index]
+        load_weight_matrix(f"mobilenet/contraction_1x1_{args.index}.npy", N)
+    else:
+        M, K, N = load_weight_matrix(f"mobilenet/contraction_1x1_{args.index}.npy", 1000)
     A_BLOCKS = M // 8    # Outdated name, should be "M_BLOCKS" but kept for backward compatibility
     C_BLOCKS = N // 49   # Same as above, should be "N_BLOCKS"
     Gy = 1
