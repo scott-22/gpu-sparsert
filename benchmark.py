@@ -18,8 +18,8 @@ NVCC_LINK_PATHS = ["-L /h/s29hao/sparsert/build/lib", "-L /pkgs/cuda-11.0/lib64"
 
 parser = argparse.ArgumentParser(description="Benchmarking script for SpMM")
 parser.add_argument("name", help="name of solution we are benchmarking ('cublas', 'sparsert')")
-parser.add_argument("source", help="source of the benchmark data ('mobilenet', 'sparsednn-1024')")
-parser.add_argument("index", type=int, default=0, help="index of the data we are benchmarking (0-12 for mobilenet, 1-1920 for sparsednn-1024)")
+parser.add_argument("source", help="source of the benchmark data ('mobilenet', 'bert85', 'sparsednn-1024')")
+parser.add_argument("index", type=int, default=0, help="index of the data we are benchmarking (0-12 for mobilenet, 0-11 for bert85, 1-1920 for sparsednn-1024)")
 args = parser.parse_args()
 
 def load_weight_matrix(path: str, N: int):
@@ -28,13 +28,14 @@ def load_weight_matrix(path: str, N: int):
     We pass in N as the number of columns of the input matrix.
     """
     wt_matrix = np.load(path)
-    _, K = wt_matrix.shape
+    M, K = wt_matrix.shape
     in_matrix = np.random.normal(size=(K, N))
     out_matrix = np.dot(wt_matrix, in_matrix)
     np.save("A.npy", wt_matrix.astype(np.float32))
     np.save("B.npy", in_matrix.astype(np.float32))
     np.save("ref.npy", out_matrix.astype(np.float32))
     np.save("ref_transposed.npy", out_matrix.astype(np.float32).transpose())
+    return (M, K, N)
 
 def generate_sparsert_test(
     M: int, K: int, N: int, A_BLOCKS: int, C_BLOCKS: int, Gy: int, infile: str
@@ -80,7 +81,7 @@ if args.name not in ["cublas", "sparsert"]:
     print("Invalid solution name to benchmark")
     sys.exit(-1)
 
-if args.source not in ["mobilenet", "sparsednn-1024"]:
+if args.source not in ["mobilenet", "sparsednn-1024", "bert85"]:
     print("Invalid benchmark data source")
     sys.exit(-1)
 
@@ -123,5 +124,35 @@ if args.source == "mobilenet":
 elif args.source == "sparsednn-1024":
     if args.index <= 0 or args.index > 1920:
         print("Invalid index")
+elif args.source == "bert85":
+    if args.index < 0 or args.index > 11:
+        print("Invalid index")
+    M, K, N = load_weight_matrix(f"bert85/encoder_layer_{args.index}_attention_self_key_weight.npy", 196)
+    A_BLOCKS = M // 8    # Outdated name, should be "M_BLOCKS" but kept for backward compatibility
+    C_BLOCKS = N // 49   # Same as above, should be "N_BLOCKS"
+    Gy = 1
+
+    TEST[args.name](
+        M, K, N, A_BLOCKS, C_BLOCKS, Gy,
+        f"bert85/encoder_layer_{args.index}_attention_self_key_weight_transposed.npy"  # SparseRT seems to require transpose of weight matrix
+    )
+
+    subprocess.run(
+        "./spmm > runtime",
+        shell=True,
+        check=True,
+    )
+
+    equiv_output = subprocess.run(
+        ["python", "scripts/test_equivalence.py", "ref.npy", "ptx_result.npy"],
+        check=True,
+        capture_output=True,
+    )
+    print(equiv_output.stdout)
+
+    with open("runtime", "r") as f:
+        runtime = f.read()
+        print(runtime)
+
 else:
     print("Invalid source")
