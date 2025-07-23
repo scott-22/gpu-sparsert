@@ -81,7 +81,7 @@ if args.name not in ["cublas", "sparsert"]:
     print("Invalid solution name to benchmark")
     sys.exit(-1)
 
-if args.source not in ["mobilenet", "sparsednn-1024", "bert85", "bert90"]:
+if args.source not in ["mobilenet", "sparsednn-1024", "bert85", "bert90", "bert80"]:
     print("Invalid benchmark data source")
     sys.exit(-1)
 
@@ -127,7 +127,7 @@ if args.source == "mobilenet":
 elif args.source == "sparsednn-1024":
     if args.index <= 0 or args.index > 1920:
         print("Invalid index")
-elif args.source in ("bert85", "bert90"):
+elif args.source in ("bert85", "bert90", "bert80"):
     if args.index < 0 or args.index > 11:
         print("Invalid index")
     M, K, N = load_weight_matrix(f"{args.source}/encoder_layer_{args.index}_attention_self_key_weight.npy", 196)
