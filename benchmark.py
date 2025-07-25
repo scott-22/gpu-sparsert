@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser(description="Benchmarking script for SpMM")
 parser.add_argument("name", help="name of solution we are benchmarking ('cublas', 'sparsert')")
 parser.add_argument("source", help="source of the benchmark data ('mobilenet', 'bert85', 'sparsednn-1024')")
 parser.add_argument("index", type=int, default=0, help="index of the data we are benchmarking (0-12 for mobilenet, 0-11 for bert85/bert90, 1-1920 for sparsednn-1024)")
+parser.add_argument("-dautotune", "--disable-autotune", action="store_true", help="disable autotuning procedure")
 args = parser.parse_args()
 
 def load_weight_matrix(path: str, N: int):
@@ -40,6 +41,7 @@ def load_weight_matrix(path: str, N: int):
 def generate_sparsert_test(
     M: int, K: int, N: int, A_BLOCKS: int, C_BLOCKS: int, Gy: int, infile: str
 ):
+    print(f"Autotuning parameters: A_Blocks={A_BLOCKS}, C_Blocks={C_BLOCKS}")
     subprocess.run([
         "python", "sparsednn/code_gen_ptx.py", 
         "--A_dim", str(M), "--B_dim", str(K), "--C_dim", str(N),
@@ -72,6 +74,28 @@ def generate_cublas_test(
         check=True,
     )
 
+def get_runtime():
+    subprocess.run(
+        "./spmm > runtime",
+        shell=True,
+        check=True,
+    )
+
+    equiv_output = subprocess.run(
+        ["python", "scripts/test_equivalence.py", "ref.npy", "ptx_result.npy"],
+        check=True,
+        capture_output=True,
+    )
+    print(equiv_output.stdout)
+
+    with open("runtime", "r") as f:
+        runtime = f.read()
+        for line in runtime.split('\n'):
+            if line.startswith("kernel used"):
+                ans = float(line.split("kernel used")[1])
+        print(runtime)
+        return ans
+
 TEST = {
     "sparsert": generate_sparsert_test,
     "cublas": generate_cublas_test,
@@ -90,39 +114,35 @@ if args.source == "mobilenet":
         print("Invalid index")
 
     # Use hardcoded values for dimensions M, K, N. The logic for these values (and the subsequent block allocation) is in autotune_float.sh
-    # We skip the autotuning process, since the code currently in autotune_float.sh doesn't actually do any autotuning, so I'm not sure
-    # what it should look like.
     DIMENSIONS = [(64, 32, 12544), (128, 64, 3136), (128, 128, 3136), (256, 128, 784), (256, 256, 784), (512, 256, 196), (512, 512, 196), 0, 0, 0, 0, (1024, 512, 49), (1024, 1024, 49)]
     if not (7 <= args.index <= 10):
         M, K, N = DIMENSIONS[args.index]
         load_weight_matrix(f"mobilenet/contraction_1x1_{args.index}.npy", N)
     else:
         M, K, N = load_weight_matrix(f"mobilenet/contraction_1x1_{args.index}.npy", 1000)
-    A_BLOCKS = M // 8    # Outdated name, should be "M_BLOCKS" but kept for backward compatibility
-    C_BLOCKS = N // 49   # Same as above, should be "N_BLOCKS"
-    Gy = 1
 
-    TEST[args.name](
-        M, K, N, A_BLOCKS, C_BLOCKS, Gy,
-        f"mobilenet/contraction_1x1_{args.index}_transposed.npy"  # SparseRT seems to require transpose of weight matrix
-    )
+    if not args.disable_autotune:
+        A_CHOICES = list(filter([M // 32, M // 16, M // 8]))
+        C_CHOICES = []
+        for i in range(49, 257):
+            if N % i == 0:
+                C_CHOICES.append(N // i)
+    else:
+        A_CHOICES = [M // 8]
+        C_CHOICES = [N // 49]
+    
+    best_runtime = float("inf")
+    for A_Blocks in A_CHOICES:      # Outdated name, should be "M_BLOCKS" but kept for backward compatibility
+        for C_Blocks in C_CHOICES:  # Same as above, should be "N_BLOCKS"
+            Gy = 1
+            TEST[args.name](
+                M, K, N, A_Blocks, C_Blocks, Gy,
+                f"mobilenet/contraction_1x1_{args.index}_transposed.npy"  # SparseRT seems to require transpose of weight matrix
+            )
+            best_runtime = min(best_runtime, get_runtime())
+    
+    print(f"Best runtime: {best_runtime}")
 
-    subprocess.run(
-        "./spmm > runtime",
-        shell=True,
-        check=True,
-    )
-
-    equiv_output = subprocess.run(
-        ["python", "scripts/test_equivalence.py", "ref.npy", "ptx_result.npy"],
-        check=True,
-        capture_output=True,
-    )
-    print(equiv_output.stdout)
-
-    with open("runtime", "r") as f:
-        runtime = f.read()
-        print(runtime)
 
 elif args.source == "sparsednn-1024":
     if args.index <= 0 or args.index > 1920:
@@ -131,31 +151,30 @@ elif args.source in ("bert85", "bert90", "bert80"):
     if args.index < 0 or args.index > 11:
         print("Invalid index")
     M, K, N = load_weight_matrix(f"{args.source}/encoder_layer_{args.index}_attention_self_key_weight.npy", 196)
-    A_BLOCKS = M // 8    # Outdated name, should be "M_BLOCKS" but kept for backward compatibility
-    C_BLOCKS = N // 49   # Same as above, should be "N_BLOCKS"
-    Gy = 1
+    
+    if not args.disable_autotune:
+        A_CHOICES = []
+        C_CHOICES = []
+        for i in range(8, 257):
+            if M % i == 0:
+                A_CHOICES.append(M // i)
+            if N % i == 0:
+                C_CHOICES.append(N // i)
+    else:
+        A_CHOICES = [M // 8]
+        C_CHOICES = [N // 49]
 
-    TEST[args.name](
-        M, K, N, A_BLOCKS, C_BLOCKS, Gy,
-        f"{args.source}/encoder_layer_{args.index}_attention_self_key_weight_transposed.npy"  # SparseRT seems to require transpose of weight matrix
-    )
-
-    subprocess.run(
-        "./spmm > runtime",
-        shell=True,
-        check=True,
-    )
-
-    equiv_output = subprocess.run(
-        ["python", "scripts/test_equivalence.py", "ref.npy", "ptx_result.npy"],
-        check=True,
-        capture_output=True,
-    )
-    print(equiv_output.stdout)
-
-    with open("runtime", "r") as f:
-        runtime = f.read()
-        print(runtime)
+    best_runtime = float("inf")
+    for A_Blocks in A_CHOICES:      # Outdated name, should be "M_BLOCKS" but kept for backward compatibility
+        for C_Blocks in C_CHOICES:  # Same as above, should be "N_BLOCKS"
+            Gy = 1
+            TEST[args.name](
+                M, K, N, A_Blocks, C_Blocks, Gy,
+                f"{args.source}/encoder_layer_{args.index}_attention_self_key_weight_transposed.npy"  # SparseRT seems to require transpose of weight matrix
+            )
+            best_runtime = min(best_runtime, get_runtime())
+    
+    print(f"Best runtime: {best_runtime}")
 
 else:
     print("Invalid source")
